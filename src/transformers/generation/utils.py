@@ -1229,6 +1229,8 @@ class GenerationMixin:
         streamer: Optional["BaseStreamer"] = None,
         negative_prompt_ids: Optional[torch.Tensor] = None,
         negative_prompt_attention_mask: Optional[torch.Tensor] = None,
+        start_noise_idx: Optional[int] = None,
+        end_noise_idx: Optional[int] = None,
         **kwargs,
     ) -> Union[GenerateOutput, torch.LongTensor]:
         r"""
@@ -1530,6 +1532,8 @@ class GenerationMixin:
                 return_dict_in_generate=generation_config.return_dict_in_generate,
                 synced_gpus=synced_gpus,
                 streamer=streamer,
+                start_noise_idx=start_noise_idx,
+                end_noise_idx=end_noise_idx,
                 **model_kwargs,
             )
 
@@ -2244,6 +2248,8 @@ class GenerationMixin:
         return_dict_in_generate: Optional[bool] = None,
         synced_gpus: bool = False,
         streamer: Optional["BaseStreamer"] = None,
+        start_noise_idx: Optional[int] = None,
+        end_noise_idx: Optional[int] = None,
         **model_kwargs,
     ) -> Union[GenerateNonBeamOutput, torch.LongTensor]:
         r"""
@@ -2386,7 +2392,7 @@ class GenerationMixin:
         # keep track of which sequences are already finished
         unfinished_sequences = torch.ones(input_ids.shape[0], dtype=torch.long, device=input_ids.device)
 
-        this_peer_finished = False  # used by synced_gpus only
+        this_peer_finished = False  # used by synced_gpus only        
         while True:
             if synced_gpus:
                 # Under synced_gpus the `forward` call must continue until all gpus complete their sequence.
@@ -2401,13 +2407,44 @@ class GenerationMixin:
             # prepare model inputs
             model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
 
-            # forward pass to get next token
-            outputs = self(
-                **model_inputs,
-                return_dict=True,
-                output_attentions=output_attentions,
-                output_hidden_states=output_hidden_states,
-            )
+            # get model embedding layer
+            embed_tokens = self.model.get_input_embeddings()
+            
+            # add noise when model_inputs are longer than the designated noise range
+            # input_ids increments by 1 each iteration, (e.g. [b, 170] => [b, 171])
+            # model_inputs has constant size (e.g. [b,1]) for every timestep t > 1
+            if start_noise_idx and end_noise_idx and model_inputs["input_ids"].shape[1] > end_noise_idx:
+                inputs_embeds = embed_tokens(model_inputs["input_ids"])
+                
+                noise_mask = torch.zeros_like(inputs_embeds).to(input_ids.device)
+                noise_mask[:, start_noise_idx:end_noise_idx] = 1
+                
+                # noise
+                # noise norm = 0.1 tensor norm
+                noise = torch.randn_like(inputs_embeds) * (0.1 / (inputs_embeds.shape[-1])**0.5)
+                inputs_embeds += noise * noise_mask
+                
+                # print(f'inputs_embeds norm: {inputs_embeds[0,:,:].norm(dim=-1).mean()}')
+                # print(f'noise norm: {noise[0,:,:].norm(dim=-1).mean()}')
+                
+                # remove the input_ids key as we want to use inputs_embeds instead
+                model_inputs.pop("input_ids")
+                
+                # forward pass to get next token
+                outputs = self(
+                    **model_inputs,
+                    inputs_embeds=inputs_embeds,
+                    return_dict=True,
+                    output_attentions=output_attentions,
+                    output_hidden_states=output_hidden_states,
+                )
+            else:
+                outputs = self(
+                    **model_inputs,
+                    return_dict=True,
+                    output_attentions=output_attentions,
+                    output_hidden_states=output_hidden_states,
+                )
 
             if synced_gpus and this_peer_finished:
                 continue  # don't waste resources running the code we don't need
