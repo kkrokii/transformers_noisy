@@ -1231,6 +1231,7 @@ class GenerationMixin:
         negative_prompt_attention_mask: Optional[torch.Tensor] = None,
         start_noise_idx: Optional[int] = None,
         end_noise_idx: Optional[int] = None,
+        noise_scale: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> Union[GenerateOutput, torch.LongTensor]:
         r"""
@@ -1534,6 +1535,7 @@ class GenerationMixin:
                 streamer=streamer,
                 start_noise_idx=start_noise_idx,
                 end_noise_idx=end_noise_idx,
+                noise_scale=noise_scale,
                 **model_kwargs,
             )
 
@@ -2250,6 +2252,7 @@ class GenerationMixin:
         streamer: Optional["BaseStreamer"] = None,
         start_noise_idx: Optional[int] = None,
         end_noise_idx: Optional[int] = None,
+        noise_scale: Optional[torch.Tensor] = None,
         **model_kwargs,
     ) -> Union[GenerateNonBeamOutput, torch.LongTensor]:
         r"""
@@ -2410,22 +2413,30 @@ class GenerationMixin:
             # get model embedding layer
             embed_tokens = self.model.get_input_embeddings()
             
-            # add noise when model_inputs are longer than the designated noise range
-            # input_ids increments by 1 each iteration, (e.g. [b, 170] => [b, 171])
-            # model_inputs has constant size (e.g. [b,1]) for every timestep t > 1
-            if start_noise_idx and end_noise_idx and model_inputs["input_ids"].shape[1] > end_noise_idx:
+            # Add noise when model_inputs are longer than the designated noise range
+            #   - input_ids increments by 1 each iteration, (e.g. [b, 170] => [b, 171])
+            #   - model_inputs has constant size (e.g. [b,1]) for every timestep t > 1
+            if start_noise_idx and end_noise_idx and model_inputs["input_ids"].shape[1] >= end_noise_idx:
                 inputs_embeds = embed_tokens(model_inputs["input_ids"])
                 
+                # 1. create mask to mask out noise on timesteps other than user inputs
                 noise_mask = torch.zeros_like(inputs_embeds).to(input_ids.device)
                 noise_mask[:, start_noise_idx:end_noise_idx] = 1
                 
-                # noise
-                # noise norm = 0.1 tensor norm
-                noise = torch.randn_like(inputs_embeds) * (0.1 / (inputs_embeds.shape[-1])**0.5)
-                inputs_embeds += noise * noise_mask
+                # 2. create noise with the same norm as inputs_embeds
+                original_inputs_embeds_norm = inputs_embeds.norm(dim=-1)                    # [b, l]
+                raw_noise = torch.randn_like(inputs_embeds)                                 # [b, l, hidden_size]
+                noise = raw_noise * (original_inputs_embeds_norm / (inputs_embeds.shape[-1])**0.5).unsqueeze(-1)
                 
-                # print(f'inputs_embeds norm: {inputs_embeds[0,:,:].norm(dim=-1).mean()}')
-                # print(f'noise norm: {noise[0,:,:].norm(dim=-1).mean()}')
+                # 3. apply noise to inputs_embeds
+                #   - new input x = (1 - a) * x + a * y
+                noise_scale = noise_scale.unsqueeze(-1)
+                inputs_embeds = (1-noise_scale)*inputs_embeds + noise_scale * (noise_mask*noise + (1-noise_mask)*inputs_embeds)
+                
+                # 4. rescale to original inputs_embeds size
+                current_inputs_embeds_norm = inputs_embeds.norm(dim=-1)                     # [b, l]
+                normalizing_factor = (original_inputs_embeds_norm / current_inputs_embeds_norm).unsqueeze(-1)
+                inputs_embeds *= normalizing_factor
                 
                 # remove the input_ids key as we want to use inputs_embeds instead
                 model_inputs.pop("input_ids")
