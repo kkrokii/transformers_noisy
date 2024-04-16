@@ -1231,6 +1231,8 @@ class GenerationMixin:
         negative_prompt_attention_mask: Optional[torch.Tensor] = None,
         start_noise_idx: Optional[int] = None,
         end_noise_idx: Optional[int] = None,
+        start_noise_idx_list: Optional[List[int]] = None,
+        end_noise_idx_list: Optional[List[int]] = None,
         noise_scale: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> Union[GenerateOutput, torch.LongTensor]:
@@ -1535,6 +1537,8 @@ class GenerationMixin:
                 streamer=streamer,
                 start_noise_idx=start_noise_idx,
                 end_noise_idx=end_noise_idx,
+                start_noise_idx_list=start_noise_idx_list,
+                end_noise_idx_list=end_noise_idx_list,
                 noise_scale=noise_scale,
                 **model_kwargs,
             )
@@ -2252,6 +2256,8 @@ class GenerationMixin:
         streamer: Optional["BaseStreamer"] = None,
         start_noise_idx: Optional[int] = None,
         end_noise_idx: Optional[int] = None,
+        start_noise_idx_list: Optional[List[int]] = None,
+        end_noise_idx_list: Optional[List[int]] = None,
         noise_scale: Optional[torch.Tensor] = None,
         **model_kwargs,
     ) -> Union[GenerateNonBeamOutput, torch.LongTensor]:
@@ -2426,6 +2432,40 @@ class GenerationMixin:
                 # 2. create noise with the same norm as inputs_embeds
                 original_inputs_embeds_norm = inputs_embeds.norm(dim=-1)                    # [b, l]
                 raw_noise = torch.randn_like(inputs_embeds)                                 # [b, l, hidden_size]
+                noise = raw_noise * (original_inputs_embeds_norm / (inputs_embeds.shape[-1])**0.5).unsqueeze(-1)
+                
+                # 3. apply noise to inputs_embeds
+                #   - new input x = (1 - a) * x + a * y
+                noise_scale = noise_scale.unsqueeze(-1)
+                inputs_embeds = (1-noise_scale)*inputs_embeds + noise_scale * (noise_mask*noise + (1-noise_mask)*inputs_embeds)
+                
+                # 4. rescale to original inputs_embeds size
+                current_inputs_embeds_norm = inputs_embeds.norm(dim=-1)                     # [b, l]
+                normalizing_factor = (original_inputs_embeds_norm / current_inputs_embeds_norm).unsqueeze(-1)
+                inputs_embeds *= normalizing_factor
+                
+                # remove the input_ids key as we want to use inputs_embeds instead
+                model_inputs.pop("input_ids")
+                
+                # forward pass to get next token
+                outputs = self(
+                    **model_inputs,
+                    inputs_embeds=inputs_embeds,
+                    return_dict=True,
+                    output_attentions=output_attentions,
+                    output_hidden_states=output_hidden_states,
+                )
+            elif start_noise_idx_list and end_noise_idx_list and model_inputs["input_ids"].shape[1] >= max(end_noise_idx_list):         ###
+                inputs_embeds = embed_tokens(model_inputs["input_ids"])
+                
+                # 1. create mask to mask out noise on timesteps other than user inputs
+                noise_mask = torch.zeros_like(inputs_embeds).to(input_ids.device)
+                for i in range(model_inputs["input_ids"].shape[0]):
+                    noise_mask[i, start_noise_idx_list[i] : end_noise_idx_list[i]] = 1
+                
+                # 2. create noise with the same norm as inputs_embeds
+                original_inputs_embeds_norm = inputs_embeds.norm(dim=-1)                    # [b, length]
+                raw_noise = torch.randn_like(inputs_embeds)                                 # [b, length, hidden_size]
                 noise = raw_noise * (original_inputs_embeds_norm / (inputs_embeds.shape[-1])**0.5).unsqueeze(-1)
                 
                 # 3. apply noise to inputs_embeds
