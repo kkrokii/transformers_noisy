@@ -963,6 +963,7 @@ class LlamaModel(LlamaPreTrainedModel):
         start_noise_idx_list: Optional[List[int]] = None,
         end_noise_idx_list: Optional[List[int]] = None,
         noise_scale: Optional[torch.Tensor] = None,
+        noise_level: Optional[int] = None
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
@@ -987,24 +988,39 @@ class LlamaModel(LlamaPreTrainedModel):
 
         # add noise to inputs_embeds
         if start_noise_idx and end_noise_idx and inputs_embeds.shape[1] >= end_noise_idx:
-            # 1. create mask to mask out noise on timesteps other than user inputs
-            noise_mask = torch.zeros_like(inputs_embeds).to(input_ids.device)
-            noise_mask[:, start_noise_idx:end_noise_idx] = 1
-            
-            # 2. create noise with the same norm as inputs_embeds
-            original_inputs_embeds_norm = inputs_embeds.norm(dim=-1)                    # [b, l]
-            raw_noise = torch.randn_like(inputs_embeds)                                 # [b, l, hidden_size]
-            noise = raw_noise * (original_inputs_embeds_norm / (inputs_embeds.shape[-1])**0.5).unsqueeze(-1)
+            if noise_level:
+                # 1. create mask to mask out noise on timesteps other than user inputs
+                noise_mask = torch.zeros_like(inputs_embeds).to(input_ids.device)
+                noise_mask[:, start_noise_idx:end_noise_idx] = 1
                 
-            # 3. apply noise to inputs_embeds
-            #   - new input x = (1 - a) * x + a * y
-            noise_scale = noise_scale.unsqueeze(-1)
-            inputs_embeds = (1-noise_mask)*inputs_embeds + noise_mask*( (1-noise_scale) * inputs_embeds + noise_scale * noise )
+                # 2. create noise with the same norm as inputs_embeds
+                raw_noise = torch.randn_like(inputs_embeds)                                 # [b, l, hidden_size]
+                    
+                # 3. apply noise to inputs_embeds
+                #   - new input x = (1 - a) * x + a * y
+                #inputs_embeds = (1-noise_mask)*inputs_embeds + noise_mask*( (1-noise_level) * inputs_embeds + noise_level * raw_noise )
+                inputs_embeds = (1-noise_mask)*inputs_embeds + noise_mask*( inputs_embeds + noise_level * raw_noise )
+                print(inputs_embeds)
                 
-            # 4. rescale to original inputs_embeds size
-            current_inputs_embeds_norm = inputs_embeds.norm(dim=-1)                     # [b, l]
-            normalizing_factor = (original_inputs_embeds_norm / current_inputs_embeds_norm).unsqueeze(-1)
-            inputs_embeds *= normalizing_factor
+            else:   # noise scale
+                # 1. create mask to mask out noise on timesteps other than user inputs
+                noise_mask = torch.zeros_like(inputs_embeds).to(input_ids.device)
+                noise_mask[:, start_noise_idx:end_noise_idx] = 1
+                
+                # 2. create noise with the same norm as inputs_embeds
+                original_inputs_embeds_norm = inputs_embeds.norm(dim=-1)                    # [b, l]
+                raw_noise = torch.randn_like(inputs_embeds)                                 # [b, l, hidden_size]
+                noise = raw_noise * (original_inputs_embeds_norm / (inputs_embeds.shape[-1])**0.5).unsqueeze(-1)
+                    
+                # 3. apply noise to inputs_embeds
+                #   - new input x = (1 - a) * x + a * y
+                noise_scale = noise_scale.unsqueeze(-1)
+                inputs_embeds = (1-noise_mask)*inputs_embeds + noise_mask*( (1-noise_scale) * inputs_embeds + noise_scale * noise )
+                    
+                # 4. rescale to original inputs_embeds size
+                current_inputs_embeds_norm = inputs_embeds.norm(dim=-1)                     # [b, l]
+                normalizing_factor = (original_inputs_embeds_norm / current_inputs_embeds_norm).unsqueeze(-1)
+                inputs_embeds *= normalizing_factor
             
         elif start_noise_idx_list and end_noise_idx_list and inputs_embeds.shape[1] >= max(end_noise_idx_list):
             # 1. create mask to mask out noise on timesteps other than user inputs
