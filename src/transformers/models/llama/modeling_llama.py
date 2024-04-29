@@ -963,7 +963,7 @@ class LlamaModel(LlamaPreTrainedModel):
         start_noise_idx_list: Optional[List[int]] = None,
         end_noise_idx_list: Optional[List[int]] = None,
         noise_scale: Optional[torch.Tensor] = None,
-        noise_level: Optional[int] = None
+        noise_level: Optional[float] = None
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
@@ -988,7 +988,7 @@ class LlamaModel(LlamaPreTrainedModel):
 
         # add noise to inputs_embeds
         if start_noise_idx and end_noise_idx and inputs_embeds.shape[1] >= end_noise_idx:
-            if noise_level:
+            if noise_level is not None:
                 # 1. create mask to mask out noise on timesteps other than user inputs
                 noise_mask = torch.zeros_like(inputs_embeds).to(input_ids.device)
                 noise_mask[:, start_noise_idx:end_noise_idx] = 1
@@ -1000,7 +1000,6 @@ class LlamaModel(LlamaPreTrainedModel):
                 #   - new input x = (1 - a) * x + a * y
                 #inputs_embeds = (1-noise_mask)*inputs_embeds + noise_mask*( (1-noise_level) * inputs_embeds + noise_level * raw_noise )
                 inputs_embeds = (1-noise_mask)*inputs_embeds + noise_mask*( inputs_embeds + noise_level * raw_noise )
-                print(inputs_embeds)
                 
             else:   # noise scale
                 # 1. create mask to mask out noise on timesteps other than user inputs
@@ -1222,6 +1221,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
         start_noise_idx_list: Optional[List[int]] = None,
         end_noise_idx_list: Optional[List[int]] = None,
         noise_scale: Optional[torch.Tensor] = None,
+        noise_level: Optional[float] = None,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         r"""
         Args:
@@ -1271,6 +1271,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
             start_noise_idx_list=start_noise_idx_list,
             end_noise_idx_list=end_noise_idx_list,
             noise_scale=noise_scale,
+            noise_level=noise_level,
         )
 
         hidden_states = outputs[0]
